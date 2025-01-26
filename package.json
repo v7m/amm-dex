@@ -1,18 +1,17 @@
 {
   "name": "amm-dex",
+  "type": "module",
   "version": "1.0.0",
   "description": "AMM DEX",
-  "main": "index.js",
   "scripts": {
     "lint": "solhint 'contracts/*.sol'",
     "lint:fix": "solhint 'contracts/**/*.sol' --fix",
     "coverage": "hardhat coverage"
   },
-  "author": "",
-  "license": "ISC",
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "@openzeppelin/contracts": "^5.2.0",
+    "chai": "4.3.7",
     "hardhat": "^2.22.18",
     "solhint": "^5.0.5",
     "solidity-coverage": "^0.8.14"

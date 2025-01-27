@@ -2,22 +2,15 @@
 
 pragma solidity ^0.8.28;
 
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "./MockToken.sol";
 
 /**
  * @title MockTokenA
- * @dev Simple mock ERC20 token for testing
+ * @dev Mock Token A, inheriting from MockToken.
  */
-contract MockTokenA is ERC20 {
-    constructor() ERC20("Mock Token A", "MTA") {
-        // Initial mint on deployment (optional)
-        _mint(msg.sender, 1000 * 10**decimals());
-    }
-
+contract MockTokenA is MockToken {
     /**
-     * @dev Allows external mint for testing purposes
+     * @dev Constructor that initializes the token with specific parameters.
      */
-    function mint(address to, uint256 amount) external {
-        _mint(to, amount);
-    }
+    constructor() MockToken("Mock Token A", "MTA", 1000 * 10**18) {}
 }

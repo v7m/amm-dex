@@ -9,6 +9,7 @@
     "coverage": "hardhat coverage"
   },
   "devDependencies": {
+    "@nomicfoundation/hardhat-chai-matchers": "^2.0.8",
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "@openzeppelin/contracts": "^5.2.0",
     "chai": "4.3.7",

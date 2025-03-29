@@ -5,13 +5,18 @@ pragma solidity ^0.8.28;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
+import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
+import "./LiquidityPositionNFT.sol";
 
 /**
  * @title LiquidityPool
  * @dev AMM liquidity pool with swap and liquidity management functionalities.
  */
 contract LiquidityPool is ERC20 {
+    using EnumerableSet for EnumerableSet.UintSet;
+
     error LiquidityPool__InsufficientLiquidityMinted(uint256 liquidity, uint256 required);
+    error LiquidityPool__PositionNotFound(address user, uint256 nftTokenId);
     error LiquidityPool__InvalidLiquidityAmount(uint256 liquidity);
     error LiquidityPool__InsufficientLiquidity(uint256 requested, uint256 available);
     error LiquidityPool__InsufficientWithdrawalAmount(uint256 liquidity);
@@ -25,10 +30,21 @@ contract LiquidityPool is ERC20 {
     uint24 public feeTier; // Fee in basis points (e.g., 300 for 3%)
     uint256 public reserve0;
     uint256 public reserve1;
-    address public factory;
+    address public liquidityPoolFactoryAddress;
+    LiquidityPositionNFT public positionNFT;
 
-    event LiquidityAdded(address indexed user, uint256 amount0, uint256 amount1, uint256 liquidity);
-    event LiquidityRemoved(address indexed user, uint256 amount0, uint256 amount1, uint256 liquidity);
+    mapping(address => EnumerableSet.UintSet) private userPositions;
+
+    event LiquidityAdded(
+        address indexed user,
+        uint256 amount0,
+        uint256 amount1,
+        uint256 liquidity,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 nftTokenId
+    );
+    event LiquidityRemoved(address indexed user, uint256 amount0, uint256 amount1, uint256 liquidity, uint256 nftTokenId);
     event Swap(address indexed user, uint256 amountIn, uint256 amountOut, address tokenIn, address tokenOut);
 
     /**
@@ -36,24 +52,34 @@ contract LiquidityPool is ERC20 {
      * @param _token0 Address of the first token.
      * @param _token1 Address of the second token.
      * @param _feeTier Fee tier for the pool.
-     * @param _factory Address of the factory contract that created this pool.
+     * @param _liquidityPoolFactoryAddress Address of the factory contract that created this pool.
      */
-    constructor(address _token0, address _token1, uint24 _feeTier, address _factory)
+    constructor(address _token0, address _token1, uint24 _feeTier, address _liquidityPoolFactoryAddress, address _positionNFTAddress)
         ERC20("LP Token", "LPT")
     {
         token0 = IERC20(_token0);
         token1 = IERC20(_token1);
         feeTier = _feeTier;
-        factory = _factory;
+        liquidityPoolFactoryAddress = _liquidityPoolFactoryAddress;
+        positionNFT = LiquidityPositionNFT(_positionNFTAddress);
     }
 
     /**
-     * @dev Adds liquidity to the pool.
+     * @dev Adds liquidity to the pool and mints an NFT.
      * @param amount0 Desired amount of token0 to add.
      * @param amount1 Desired amount of token1 to add.
+     * @param tickLower Lower bound of liquidity range.
+     * @param tickUpper Upper bound of liquidity range.
      * @return liquidity Amount of LP tokens minted.
      */
-    function addLiquidity(uint256 amount0, uint256 amount1) external returns (uint256 liquidity) {
+    function addLiquidity(
+        uint256 amount0,
+        uint256 amount1,
+        int24 tickLower,
+        int24 tickUpper
+    ) external returns (
+        uint256 liquidity
+    ) {
         if (totalSupply() == 0) {
             liquidity = Math.sqrt(amount0 * amount1);
             if (liquidity <= 0) revert LiquidityPool__InsufficientLiquidityMinted(liquidity, 1);
@@ -70,20 +96,27 @@ contract LiquidityPool is ERC20 {
 
         _mint(msg.sender, liquidity);
 
-        emit LiquidityAdded(msg.sender, amount0, amount1, liquidity);
+        uint256 nftTokenId = positionNFT.mint(msg.sender, address(token0), address(token1), liquidity, tickLower, tickUpper);
+        userPositions[msg.sender].add(nftTokenId);
+
+        emit LiquidityAdded(msg.sender, amount0, amount1, liquidity, tickLower, tickUpper, nftTokenId);
     }
 
     /**
-     * @dev Removes liquidity from the pool.
-     * @param liquidity Amount of LP tokens to burn.
+     * @dev Removes liquidity from the pool and burns the corresponding NFT.
+     * @param nftTokenId The ID of the NFT representing the liquidity position.
      * @return amount0 Amount of token0 returned.
      * @return amount1 Amount of token1 returned.
      */
-    function removeLiquidity(uint256 liquidity) external returns (uint256 amount0, uint256 amount1) {
+    function removeLiquidity(uint256 nftTokenId) external returns (uint256 amount0, uint256 amount1) {
+        LiquidityPositionNFT.Position memory position = positionNFT.getPosition(nftTokenId);
+
+        if (position.owner != msg.sender) revert LiquidityPool__PositionNotFound(msg.sender, nftTokenId);
+
+        uint256 liquidity = position.liquidity;
         if (liquidity <= 0) revert LiquidityPool__InvalidLiquidityAmount(liquidity);
 
         uint256 userBalance = balanceOf(msg.sender);
-
         if (liquidity > userBalance) revert LiquidityPool__InsufficientLiquidity(liquidity, userBalance);
 
         amount0 = (liquidity * reserve0) / totalSupply();
@@ -99,7 +132,11 @@ contract LiquidityPool is ERC20 {
         token0.transfer(msg.sender, amount0);
         token1.transfer(msg.sender, amount1);
 
-        emit LiquidityRemoved(msg.sender, amount0, amount1, liquidity);
+        positionNFT.burn(nftTokenId);
+        // Remove the nftTokenId from the user's positions list
+        if (!userPositions[msg.sender].remove(nftTokenId)) revert LiquidityPool__PositionNotFound(msg.sender, nftTokenId);
+
+        emit LiquidityRemoved(msg.sender, amount0, amount1, liquidity, nftTokenId);
     }
 
     function swap(uint256 amountIn, address tokenIn, address tokenOut) external returns (uint256 amountOut) {
@@ -149,5 +186,30 @@ contract LiquidityPool is ERC20 {
         }
 
         emit Swap(msg.sender, amountIn, amountOut, tokenIn, tokenOut);
+    }
+
+    /**
+     * @dev Returns the number of liquidity positions a user has.
+     * @param user The address of the liquidity provider.
+     * @return count The number of NFT positions.
+     */
+    function getUserPositionsCount(address user) external view returns (uint256) {
+        return userPositions[user].length();
+    }
+
+    /**
+     * @dev Returns the liquidity position NFT IDs owned by a user.
+     * @param user The address of the liquidity provider.
+     * @return nftTokenIds An array of NFT token IDs.
+     */
+    function getUserPositions(address user) external view returns (uint256[] memory) {
+        uint256 length = userPositions[user].length();
+        uint256[] memory nftTokenIds = new uint256[](length);
+
+        for (uint256 i = 0; i < length; i++) {
+            nftTokenIds[i] = userPositions[user].at(i);
+        }
+
+        return nftTokenIds;
     }
 }

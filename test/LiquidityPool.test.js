@@ -4,51 +4,74 @@ import hardhat from 'hardhat';
 const { ethers } = hardhat;
 
 describe("LiquidityPool", () => {
-  let LiquidityPool;
+  let liquidityPoolFactory;
   let liquidityPool;
+  let LiquidityPositionNFT;
+  let liquidityPositionNFT;
   let deployer;
   let user;
   let mockTokenA;
   let mockTokenB;
-  let liquidityPoolFactory;
 
   const feeTier = 300; // 0.3%
+  const TICK_LOWER = -100;
+  const TICK_UPPER = 100;
 
   before(async () => {
     [deployer, user] = await ethers.getSigners();
   });
 
   beforeEach(async () => {
-    // Deploy MockTokenA
+    // Deploy MockTokenA with 1000 initial tokens
     const MockTokenA = await ethers.getContractFactory("MockTokenA");
     mockTokenA = await MockTokenA.deploy();
     await mockTokenA.waitForDeployment();
 
-    // Deploy MockTokenB
+    // Deploy MockTokenB with 2000 initial tokens
     const MockTokenB = await ethers.getContractFactory("MockTokenB");
     mockTokenB = await MockTokenB.deploy();
     await mockTokenB.waitForDeployment();
 
+    // Deploy LiquidityPositionNFT contract
+    LiquidityPositionNFT = await ethers.getContractFactory("LiquidityPositionNFT");
+    liquidityPositionNFT = await LiquidityPositionNFT.deploy();
+    await liquidityPositionNFT.waitForDeployment();
+
     // Deploy LiquidityPoolFactory
     const LiquidityPoolFactory = await ethers.getContractFactory("LiquidityPoolFactory");
-    liquidityPoolFactory = await LiquidityPoolFactory.deploy();
+    liquidityPoolFactory = await LiquidityPoolFactory.deploy(liquidityPositionNFT.target);
     await liquidityPoolFactory.waitForDeployment();
 
-    // Deploy LiquidityPool
-    LiquidityPool = await ethers.getContractFactory("LiquidityPool");
-    liquidityPool = await LiquidityPool.deploy(
-      mockTokenA.target,
-      mockTokenB.target,
-      feeTier,
-      liquidityPoolFactory.target
-    );
-    await liquidityPool.waitForDeployment();
+    // Grant POOL_FACTORY_ROLE to LiquidityPoolFactory
+    await liquidityPositionNFT.grantPoolFactoryRole(liquidityPoolFactory.target);
+
+    // Create a new liquidity pool
+    const createLiquidityPoolTx = await liquidityPoolFactory.createLiquidityPool(mockTokenA.target, mockTokenB.target, feeTier);
+
+    const receipt = await createLiquidityPoolTx.wait();
+    const logs = receipt.logs;
+
+    // Find the PoolCreated event log
+    const poolCreatedLog = logs.find((log) => {
+      try {
+        return liquidityPoolFactory.interface.parseLog(log).name === "LiquidityPoolCreated";
+      } catch (err) {
+        return false;
+      }
+    });
+
+    if (!poolCreatedLog) throw new Error("LiquidityPoolCreated event not found");
+
+    const parsedEvent = liquidityPoolFactory.interface.parseLog(poolCreatedLog);
+    const liquidityPoolAddress = parsedEvent.args.pool;
+
+    liquidityPool = await ethers.getContractAt("LiquidityPool", liquidityPoolAddress);
   });
 
   describe("constructor", () => {
-    it("sets the correct factory address", async () => {
-      const factoryAddress = await liquidityPool.factory();
-      expect(factoryAddress).to.equal(liquidityPoolFactory.target);
+    it("sets the correct liquidity pool factory address", async () => {
+      const poolFactoryAddress = await liquidityPool.liquidityPoolFactoryAddress();
+      expect(poolFactoryAddress).to.equal(liquidityPoolFactory.target);
     });
 
     it("sets the correct fee tier", async () => {
@@ -84,7 +107,9 @@ describe("LiquidityPool", () => {
       // Add liquidity
       const tx = await liquidityPool.addLiquidity(
         ethers.parseEther("100"),
-        ethers.parseEther("100")
+        ethers.parseEther("100"),
+        TICK_LOWER,
+        TICK_UPPER
       );
       await tx.wait();
 
@@ -107,35 +132,80 @@ describe("LiquidityPool", () => {
 
     it("prevents adding zero liquidity", async () => {
       await expect(
-        liquidityPool.addLiquidity(0, 0)
+        liquidityPool.addLiquidity(0, 0, TICK_LOWER, TICK_UPPER)
       ).to.be.revertedWithCustomError(liquidityPool, "LiquidityPool__InsufficientLiquidityMinted")
         .withArgs(0, 1);
     });
 
+    it("mints a new position NFT token on successful addition", async () => {
+      // Check NFT balance
+      const nftBalance = await liquidityPositionNFT.balanceOf(deployer.address);
+      expect(nftBalance).to.equal(0);
+
+      // Add liquidity
+      const tx = await liquidityPool.addLiquidity(ethers.parseEther("100"), ethers.parseEther("100"), TICK_LOWER, TICK_UPPER);
+      await tx.wait();
+
+      // Check NFT balance
+      const newNftBalance = await liquidityPositionNFT.balanceOf(deployer.address);
+      expect(newNftBalance).to.equal(1);
+    });
+
     it("emits LiquidityAdded event on successful addition", async () => {
-      await expect(liquidityPool.addLiquidity(ethers.parseEther("100"), ethers.parseEther("100")))
+      await expect(liquidityPool.addLiquidity(ethers.parseEther("100"), ethers.parseEther("100"), TICK_LOWER, TICK_UPPER))
         .to.emit(liquidityPool, "LiquidityAdded")
         .withArgs(
           deployer.address,
           ethers.parseEther("100"),
           ethers.parseEther("100"),
-          ethers.parseEther("100")
+          ethers.parseEther("100"),
+          TICK_LOWER,
+          TICK_UPPER,
+          0
         );
     });
   });
 
   describe("removeLiquidity", () => {
+    let nftTokenId;
+
     beforeEach(async () => {
       await mockTokenA.approve(liquidityPool.target, ethers.parseEther("100"));
       await mockTokenB.approve(liquidityPool.target, ethers.parseEther("100"));
+
       // Add initial liquidity
-      await liquidityPool.addLiquidity(ethers.parseEther("100"), ethers.parseEther("100"));
+      const addLiquidityTx = await liquidityPool.addLiquidity(ethers.parseEther("100"), ethers.parseEther("100"), TICK_LOWER, TICK_UPPER);
+
+      const receipt = await addLiquidityTx.wait();
+      
+      const parsedLogs = receipt.logs
+        .map(log => {
+          try {
+            return liquidityPool.interface.parseLog(log);
+          } catch (err) {
+            return null;
+          }
+        })
+        .filter(Boolean); // remove any logs not from liquidityPool
+
+      const event = parsedLogs.find(e => e.name === "LiquidityAdded");
+      if (!event) throw new Error("LiquidityAdded event not found");
+
+      nftTokenId = event.args.nftTokenId; // Extract nftTokenId from LiquidityAdded event
+
+      await liquidityPositionNFT.setApprovalForAll(await liquidityPool.getAddress(), true);
     });
 
     it("allows removing liquidity and burns LP tokens", async () => {
       // Check initial LP balance
       const initialLpBalance = await liquidityPool.balanceOf(deployer.address);
       expect(initialLpBalance).to.equal(ethers.parseEther("100"));
+
+      // Check initial reserves
+      const initialReserve0 = await liquidityPool.reserve0();
+      const initialReserve1 = await liquidityPool.reserve1();
+      expect(initialReserve0).to.equal(ethers.parseEther("100"));
+      expect(initialReserve1).to.equal(ethers.parseEther("100"));
 
       // Check initial token balances
       const initialTokenABalance = await mockTokenA.balanceOf(deployer.address);
@@ -144,48 +214,52 @@ describe("LiquidityPool", () => {
       expect(initialTokenBBalance).to.equal(ethers.parseEther("1900")); // 2000 - 100
 
       // Remove liquidity
-      const tx = await liquidityPool.removeLiquidity(ethers.parseEther("50"));
+      const tx = await liquidityPool.removeLiquidity(nftTokenId);
       await tx.wait();
+
+      // Check LP balance
+      const lpBalance = await liquidityPool.balanceOf(deployer.address);
+      expect(lpBalance).to.equal(0);
 
       // Check reserves
       const reserve0 = await liquidityPool.reserve0();
       const reserve1 = await liquidityPool.reserve1();
-      expect(reserve0).to.equal(ethers.parseEther("50"));
-      expect(reserve1).to.equal(ethers.parseEther("50"));
-
-      // Check LP balance
-      const lpBalance = await liquidityPool.balanceOf(deployer.address);
-      expect(lpBalance).to.equal(ethers.parseEther("50"));
+      expect(reserve0).to.equal(0);
+      expect(reserve1).to.equal(0);
 
       // Check token balances
       const tokenABalance = await mockTokenA.balanceOf(deployer.address);
       const tokenBBalance = await mockTokenB.balanceOf(deployer.address);
-      expect(tokenABalance).to.equal(ethers.parseEther("950")); // 900 + 50
-      expect(tokenBBalance).to.equal(ethers.parseEther("1950")); // 1900 + 50
+      expect(tokenABalance).to.equal(ethers.parseEther("1000"));
+      expect(tokenBBalance).to.equal(ethers.parseEther("2000"));
     });
 
-    it("prevents removing more liquidity than owned", async () => {
-      await expect(
-        liquidityPool.removeLiquidity(ethers.parseEther("150"))
-      ).to.be.revertedWithCustomError(liquidityPool, "LiquidityPool__InsufficientLiquidity")
-        .withArgs(ethers.parseEther("150"), ethers.parseEther("100"));
-    });
+    it("burns position NFT token on successful removal", async () => {
+      // Check NFT owner
+      expect(await liquidityPositionNFT.ownerOf(nftTokenId)).to.equal(deployer.address);
 
-    it("prevents removing zero liquidity", async () => {
-      await expect(
-        liquidityPool.removeLiquidity(0)
-      ).to.be.revertedWithCustomError(liquidityPool, "LiquidityPool__InvalidLiquidityAmount")
-        .withArgs(0);
+      // Remove liquidity
+      const tx = await liquidityPool.removeLiquidity(nftTokenId);
+      await tx.wait();
+
+      // Check NFT owner
+      await expect(liquidityPositionNFT.ownerOf(nftTokenId))
+        .to.be.revertedWithCustomError(liquidityPositionNFT, "ERC721NonexistentToken");
+
+      // Check NFT balance
+      const nftBalance = await liquidityPositionNFT.balanceOf(deployer.address);
+      expect(nftBalance).to.equal(0);
     });
 
     it("emits LiquidityRemoved event on successful removal", async () => {
-      await expect(liquidityPool.removeLiquidity(ethers.parseEther("50")))
+      await expect(liquidityPool.removeLiquidity(nftTokenId))
         .to.emit(liquidityPool, "LiquidityRemoved")
         .withArgs(
           deployer.address,
-          ethers.parseEther("50"),
-          ethers.parseEther("50"),
-          ethers.parseEther("50")
+          ethers.parseEther("100"),
+          ethers.parseEther("100"),
+          ethers.parseEther("100"),
+          nftTokenId
         );
     });
   });
@@ -195,7 +269,7 @@ describe("LiquidityPool", () => {
       await mockTokenA.approve(liquidityPool.target, ethers.parseEther("1000"));
       await mockTokenB.approve(liquidityPool.target, ethers.parseEther("1000"));
       // Add initial liquidity
-      await liquidityPool.addLiquidity(ethers.parseEther("100"), ethers.parseEther("100"));
+      await liquidityPool.addLiquidity(ethers.parseEther("100"), ethers.parseEther("100"), TICK_LOWER, TICK_UPPER);
     });
 
     it("allows swapping token0 for token1", async () => {
@@ -328,10 +402,10 @@ describe("LiquidityPool", () => {
     });
   });
 
-  describe("factory", () => {
-    it("returns the correct factory address", async () => {
-      const factoryAddress = await liquidityPool.factory();
-      expect(factoryAddress).to.equal(liquidityPoolFactory.target);
+  describe("liquidityPoolFactoryAddress", () => {
+    it("returns the correct liquidity pool factory address", async () => {
+      const poolFactoryAddress = await liquidityPool.liquidityPoolFactoryAddress();
+      expect(poolFactoryAddress).to.equal(liquidityPoolFactory.target);
     });
   });
 });

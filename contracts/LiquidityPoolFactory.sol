@@ -9,9 +9,18 @@ import "./LiquidityPool.sol";
  * @dev Factory contract to create and manage LiquidityPool instances.
  */
 contract LiquidityPoolFactory {
-    address[] public allPools;
+    address[] public liquidityPools;
+    address public liquidityPositionNFTAddress;
 
-    event LiquidityPoolFactory__PoolCreated(address indexed pool, address token0, address token1, uint24 feeTier);
+    event LiquidityPoolCreated(address indexed pool, address token0, address token1, uint24 feeTier);
+
+    /**
+     * @dev Constructor for LiquidityPoolFactory.
+     * @param _liquidityPositionNFTAddress The address of the deployed LiquidityPositionNFT contract.
+     */
+    constructor(address _liquidityPositionNFTAddress) {
+        liquidityPositionNFTAddress = _liquidityPositionNFTAddress;
+    }
 
     /**
      * @dev Creates a new LiquidityPool for the given tokens and fee tier.
@@ -20,15 +29,18 @@ contract LiquidityPoolFactory {
      * @param feeTier Fee tier for the pool.
      * @return pool Address of the newly created LiquidityPool.
      */
-    function createPool(address token0, address token1, uint24 feeTier) external returns (address pool) {
-        LiquidityPool newPool = new LiquidityPool(token0, token1, feeTier, address(this));
+    function createLiquidityPool(address token0, address token1, uint24 feeTier) external returns (address pool) {
+        LiquidityPool liquidityPool = new LiquidityPool(token0, token1, feeTier, address(this), liquidityPositionNFTAddress);
         
         // Keep track of the newly created pool in an array
-        allPools.push(address(newPool));
+        liquidityPools.push(address(liquidityPool));
 
-        emit LiquidityPoolFactory__PoolCreated(address(newPool), token0, token1, feeTier);
+        // Grant POOL_ROLE to the new liquidity pool in the NFT contract.
+        LiquidityPositionNFT(liquidityPositionNFTAddress).grantPoolRole(address(liquidityPool));
 
-        return address(newPool);
+        emit LiquidityPoolCreated(address(liquidityPool), token0, token1, feeTier);
+
+        return address(liquidityPool);
     }
 
     /**
@@ -36,6 +48,6 @@ contract LiquidityPoolFactory {
      * @return The count of LiquidityPool instances created.
      */
     function getPoolsCount() external view returns (uint256) {
-        return allPools.length;
+        return liquidityPools.length;
     }
 }

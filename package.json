@@ -13,7 +13,7 @@
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "@openzeppelin/contracts": "^5.2.0",
     "chai": "4.3.7",
-    "hardhat": "^2.22.18",
+    "hardhat": "^2.22.19",
     "solhint": "^5.0.5",
     "solidity-coverage": "^0.8.14"
   }
